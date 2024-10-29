@@ -1,0 +1,23 @@
+version: "3"
+
+services:
+  app:
+    env_file:
+      - .env
+    image: xudingjun3131/sgcc_shgas_veolia:v1.0
+    # build:
+    #   context: .
+    #   dockerfile: Dockerfile
+    container_name: sgcc_shgas_veolia
+    networks:
+      sgcc_network:
+    environment:
+      - SET_CONTAINER_TIMEZONE=true
+      - CONTAINER_TIMEZONE=Asia/Shanghai
+    restart: unless-stopped
+    volumes:
+      - ./scripts:/app
+    command: python3 main.py 
+
+networks:
+  sgcc_network:
