@@ -1,0 +1,56 @@
+name: Docker Image Build Test
+
+on:  
+  push:
+    branches:
+      - master
+    paths:
+      - 'scripts/**'
+      - 'Dockerfile-for-github-action'
+      - 'requirements.txt'
+      - 'example.env'
+      - '.github/workflows/docker-image-test.yml'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'version of this branch'
+        required: true
+        type: string
+
+jobs:
+
+  build:
+
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Set version
+      id: version
+      run: |
+        if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+          VERSION=${GITHUB_REF#refs/tags/}
+        else
+          VERSION=$(git rev-parse --short HEAD)
+        fi
+        echo "version=${VERSION}" >> $GITHUB_OUTPUT
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Build Docker image
+      run: |
+        PLATFORMS=linux/arm64,linux/amd64
+        DOCKER_IMAGE=arcw/sgcc_electricity
+        ARCH_TAGS="arm64 amd64"        
+        VERSION=${{ steps.version.outputs.version }}
+        docker buildx build --build-arg VERSION=${VERSION} --platform $PLATFORMS -t $DOCKER_IMAGE:${VERSION} --file Dockerfile-for-github-action .
+
+        for ARCH in $ARCH_TAGS; do
+          if [ "$ARCH" == "arm64" ]; then
+            TAG_ARCH="aarch64"
+          else
+            TAG_ARCH=$ARCH
+          fi
+          docker buildx build --build-arg VERSION=${VERSION} --platform linux/${ARCH} -t ${DOCKER_IMAGE}-${TAG_ARCH}:${VERSION}  --file Dockerfile-for-github-action .
+        done

@@ -1,0 +1,42 @@
+# ── 环境变量 / 密钥文件 ──
+.env
+*.env
+!example.env
+
+# ── Python 编译缓存 ──
+__pycache__/
+*.py[cod]
+*$py.class
+
+# ── 运行时数据 ──
+data/
+screenshots/
+
+# ── 调试 / 测试文件 ──
+debug_*
+test_*
+*_test.py
+
+# ── IDE ──
+.idea/
+.vscode/
+.claude/
+
+# ── Git ──
+.git/
+.gitignore
+
+# ── 文档 / 资源 ──
+assets/
+*.md
+!README.md
+
+# ── Docker / CI ──
+docker-compose*.yml
+Dockerfile*
+.dockerignore
+
+# ── 依赖 ──
+.venv/
+venv/
+env/
