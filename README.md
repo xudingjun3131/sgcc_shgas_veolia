@@ -1,7 +1,7 @@
-**二开说明：**
-本仓库从 https://github.com/ARC-MX/sgcc_electricity_new.git 二开而来，并定期同步上游。原仓库只有国家电网数据，本仓库在保留上游全部功能的基础上，新增了**上海燃气（SHRQ）**和**浦东威立雅水费（PDWLY）**两个数据源，三个数据源的数据一起推送到 Home Assistant。
+**本次更新说明：**
+本仓库的国网电力部分与上游 [ARC-MX/sgcc_electricity_new](https://github.com/ARC-MX/sgcc_electricity_new.git) 同源，本次将其 v1.7.x → v1.8.1+ 的全部演进合入：Playwright/CloakBrowser 反检测登录、大模型（LLM）验证码识别（替代 ONNX）、SQLite/MySQL 存储、余额不足推送通知、Home Assistant Add-on 支持等。**上海燃气（SHRQ）**和**浦东威立雅水费（PDWLY）**两个数据源已同步移植到新架构，功能与实体保持不变，三个数据源的数据一起推送到 Home Assistant。
 
-### 二开新增环境变量
+### 上海燃气 / 浦东威立雅环境变量
 
 ```bash
 ## 上海燃气
@@ -12,7 +12,7 @@ SHRQ_PASSWORD=xxxxxxxx
 PDWLY_ID=['xxxxxxxxx','yyyyyyyyy']
 ```
 
-### 二开新增 Home Assistant 实体
+### 上海燃气 / 浦东威立雅 Home Assistant 实体
 
 | 实体 | 说明 |
 |---|---|
