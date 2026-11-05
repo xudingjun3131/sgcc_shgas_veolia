@@ -1,67 +1,109 @@
+import nest_asyncio; nest_asyncio.apply()
 import logging
 import logging.config
-import requests
 import os
 import sys
 import time
-import traceback
-from datetime import datetime,timedelta
-
-import dotenv
 import schedule
-
-from const import *
-from data_fetcher import DataFetcher
+import json
+import random
+import traceback
+from error_watcher import ErrorWatcher
 from sensor_updator import SensorUpdator
 
-BALANCE = 0.0
-PUSHPLUS_TOKEN = []
-RECHARGE_NOTIFY = False
+from datetime import datetime,timedelta
+from const import *
+from data_fetcher import DataFetcher
+
 def main():
-    # 读取 .env 文件
-    dotenv.load_dotenv(verbose=True)
-    global BALANCE
-    global PUSHPLUS_TOKEN
-    global RECHARGE_NOTIFY
+    global RETRY_TIMES_LIMIT
+    if 'PYTHON_IN_DOCKER' not in os.environ:
+        # 读取 .env 文件
+        import dotenv
+        dotenv.load_dotenv(verbose=True)
+    if os.path.isfile('/data/options.json'):
+        with open('/data/options.json') as f:
+            options = json.load(f)
+        try:
+            for key, value in options.items():
+                os.environ[key] = str(value)
+            import const
+            const.LLM_API_KEY = os.getenv('LLM_API_KEY', '').strip()
+            const.LLM_BASE_URL = os.getenv('LLM_BASE_URL', 'https://api.siliconflow.cn/v1')
+            const.LLM_MODEL = os.getenv('LLM_MODEL', 'Qwen/Qwen3.5-35B-A3B')
+            logging.info(f"当前以Homeassistant Add-on 形式运行.")
+        except Exception as e:
+            logging.error(f"读取 options.json 文件失败，程序将退出，错误信息: {e}。")
+            sys.exit()
+
     try:
         PHONE_NUMBER = os.getenv("PHONE_NUMBER")
+        logging.info(f"读取环境变量 PHONE_NUMBER : {PHONE_NUMBER}")
         PASSWORD = os.getenv("PASSWORD")
         HASS_URL = os.getenv("HASS_URL")
-        HASS_TOKEN = os.getenv("HASS_TOKEN")
-        JOB_START_TIME = os.getenv("JOB_START_TIME")
-        LOG_LEVEL = os.getenv("LOG_LEVEL")
+        JOB_START_TIME = os.getenv("JOB_START_TIME","07:00" ).strip('"').strip("'")
+        LOG_LEVEL = os.getenv("LOG_LEVEL","INFO")
         VERSION = os.getenv("VERSION")
-        BALANCE = float(os.getenv("BALANCE"))
-        PUSHPLUS_TOKEN = os.getenv("PUSHPLUS_TOKEN").split(",")
-        RECHARGE_NOTIFY = os.getenv("RECHARGE_NOTIFY", "false").lower() == "true"
+        RETRY_TIMES_LIMIT = int(os.getenv("RETRY_TIMES_LIMIT", 5))
+        # 二开新增：上海燃气 / 浦东威立雅
         SHRQ_PHONE_NUMBER = os.getenv("SHRQ_PHONE_NUMBER")
         SHRQ_PASSWORD = os.getenv("SHRQ_PASSWORD")
         PDWLY_ID = os.getenv("PDWLY_ID")
+
+        logger_init(LOG_LEVEL)
+        logging.info(f"当前以Docker镜像方式运行。")
     except Exception as e:
-        logging.error(f"Failing to read the .env file, the program will exit with an error message: {e}.")
+        logging.error(f"读取 .env 文件失败，程序将退出，错误信息: {e}。")
         sys.exit()
 
-    logger_init(LOG_LEVEL)
-    logging.info(f"The current repository version is {VERSION}, and the repository address is https://github.com/xudingjun3131/sgcc_shgas_veolia.git")
+    logging.info(f"当前仓库版本为 {VERSION}，仓库地址为 https://github.com/ARC-MX/sgcc_electricity_new.git")
+    current_datetime = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    logging.info(f"当前日期为 {current_datetime}。")
 
+    logging.info(f"开始初始化 ErrorWatcher")
+    ErrorWatcher.init(root_dir='/data/errors')
+    logging.info(f'ErrorWatcher 初始化完成！')
     fetcher = DataFetcher(PHONE_NUMBER, PASSWORD, SHRQ_PHONE_NUMBER, SHRQ_PASSWORD, PDWLY_ID)
-    updator = SensorUpdator(HASS_URL, HASS_TOKEN)
-    logging.info(f"The current logged-in user name is {PHONE_NUMBER}, the homeassistant address is {HASS_URL}, and the program will be executed every day at {JOB_START_TIME}.")
+    updator = SensorUpdator()
 
-    next_run_time = datetime.strptime(JOB_START_TIME, "%H:%M") + timedelta(hours=12)
-    logging.info(f'Run job now! The next run will be at {JOB_START_TIME} and {next_run_time.strftime("%H:%M")} every day')
-    schedule.every().day.at(JOB_START_TIME).do(run_task, fetcher, updator)
+    # 生成随机延迟时间（-10分钟到+10分钟）
+    random_delay_minutes = random.randint(-10, 10)
+    parsed_time = datetime.strptime(JOB_START_TIME, "%H:%M") + timedelta(minutes=random_delay_minutes)
+    logging.info(f"当前登录用户名为 {PHONE_NUMBER}，Home Assistant 地址为 {HASS_URL}，程序将每天在 {parsed_time.strftime('%H:%M')} 执行。")
+
+    # 添加随机延迟
+    next_run_time = parsed_time + timedelta(hours=12)
+
+    logging.info(f'立即执行任务！下次运行时间为每天 {parsed_time.strftime("%H:%M")} 和 {next_run_time.strftime("%H:%M")}')
+    schedule.every().day.at(parsed_time.strftime("%H:%M")).do(run_task, fetcher, updator)
     schedule.every().day.at(next_run_time.strftime("%H:%M")).do(run_task, fetcher, updator)
-    run_task(fetcher, updator)
+
+    # 重发缓存到 HA 的间隔（分钟），默认 60 分钟，用于防止 HA 重启后数据丢失
+    CACHE_REPUBLISH_INTERVAL = int(os.getenv("CACHE_REPUBLISH_INTERVAL", "60"))
+    schedule.every(CACHE_REPUBLISH_INTERVAL).minutes.do(republish_or_fetch, updator, fetcher)
+
+    # 启动时先尝试从缓存恢复
+    # 如果缓存恢复成功，则跳过本次启动时的实时抓取，避免频繁重启导致账号被封
+    if not updator.republish():
+        logging.info("未找到有效缓存，正在从国家电网获取数据...")
+        run_task(fetcher, updator)
+    else:
+        logging.info("已从缓存恢复数据，跳过启动时抓取以保护账号。")
 
     while True:
         schedule.run_pending()
         time.sleep(1)
 
 
-def run_task(data_fetcher: DataFetcher, sensor_updator: SensorUpdator):
-    try:
+def republish_or_fetch(updator: SensorUpdator, fetcher: DataFetcher):
+    if not updator.republish():
+        logging.info("缓存数据已过期或不存在，正在从国家电网获取数据...")
+        run_task(fetcher, updator)
 
+
+def run_task(data_fetcher: DataFetcher, sensor_updator: SensorUpdator):
+    # 二开新增：浦东威立雅水费数据（失败不影响国网/燃气）
+    try:
         user_id_list, month_usage_total_list, month_usage_water_list, month_usage_dirty_list, month_charge_total_list, month_charge_water_list, month_charge_dirty_list, month_list = data_fetcher.fetch_pdwly()
         for i in range(0, len(user_id_list)):
             profix = f"_{user_id_list[i]}" if len(user_id_list) > 1 else ""
@@ -83,8 +125,12 @@ def run_task(data_fetcher: DataFetcher, sensor_updator: SensorUpdator):
             if month_charge_dirty_list[i] is not None:
                 sensor_updator.update(PDWLY_MONTHLY_CHARGE_DIRTY_SENSOR_NAME + profix, month_list[i],
                                       month_charge_dirty_list[i], BALANCE_UNIT, month=True)
+    except Exception as e:
+        logging.error(f"浦东威立雅水费数据刷新任务失败，原因是 [{e}]")
+        traceback.print_exc()
 
-
+    # 二开新增：上海燃气数据（失败不影响国网/水费）
+    try:
         user_id_list, yearly_usage_list, month_usage_list, month_charge_list, month_list = data_fetcher.fetch_shrq()
         for i in range(0, len(user_id_list)):
             profix = f"_{user_id_list[i]}" if len(user_id_list) > 1 else ""
@@ -96,43 +142,28 @@ def run_task(data_fetcher: DataFetcher, sensor_updator: SensorUpdator):
             if yearly_usage_list[i] is not None:
                 sensor_updator.update(SHRQ_YEARLY_USAGE_SENSOR_NAME + profix, month_list[i], yearly_usage_list[i],
                                       USAGE_UNIT_CUBE, month=True)
-
-
-        user_id_list, balance_list, last_daily_date_list, last_daily_usage_list, yearly_charge_list, yearly_usage_list, month_list, month_usage_list, month_charge_list = data_fetcher.fetch()
-        # user_id_list, balance_list, last_daily_date_list, last_daily_usage_list, yearly_charge_list, yearly_usage_list, month_list, month_usage_list, month_charge_list = ['123456'],[58.1],['2024-05-12'],[3.0],['239.1'],['533'],['2024-04-01-2024-04-30'],['118'],['52.93']
-        for i in range(0, len(user_id_list)):
-            profix = f"_{user_id_list[i]}" if len(user_id_list) > 1 else ""
-            if balance_list[i] is not None:
-                sensor_updator.update(BALANCE_SENSOR_NAME + profix, None, balance_list[i], BALANCE_UNIT)
-                if balance_list[i] < BALANCE and RECHARGE_NOTIFY:
-                    for token in PUSHPLUS_TOKEN:
-                        title= '电费余额不足提醒'
-                        content =f'您用户号{user_id_list[i]}的当前电费余额为：{balance_list[i]}元，请及时充值。'
-                        url = 'http://www.pushplus.plus/send?token='+token+'&title='+title+'&content='+content
-                        requests.get(url)
-                        logging.info(f'The current balance of user id {user_id_list[i]} is {balance_list[i]} CNY less than {BALANCE}CNY, notice has been sent, please pay attention to check and recharge.')
-            if last_daily_usage_list[i] is not None:
-                sensor_updator.update(DAILY_USAGE_SENSOR_NAME + profix, last_daily_date_list[i], last_daily_usage_list[i], USAGE_UNIT)
-            if yearly_usage_list[i] is not None:
-                sensor_updator.update(YEARLY_USAGE_SENSOR_NAME + profix, None, yearly_usage_list[i], USAGE_UNIT)
-            if yearly_charge_list[i] is not None:
-                sensor_updator.update(YEARLY_CHARGE_SENSOR_NAME + profix, None, yearly_charge_list[i], BALANCE_UNIT)
-            if month_charge_list[i] is not None:
-                sensor_updator.update(MONTH_CHARGE_SENSOR_NAME + profix, month_list[i], month_charge_list[i], BALANCE_UNIT, month=True)
-            if month_usage_list[i] is not None:
-                sensor_updator.update(MONTH_USAGE_SENSOR_NAME + profix, month_list[i], month_usage_list[i], USAGE_UNIT, month=True)
-
-
-
-        logging.info("state-refresh task run successfully!")
     except Exception as e:
-        logging.error(f"state-refresh task failed, reason is {e}")
+        logging.error(f"上海燃气数据刷新任务失败，原因是 [{e}]")
         traceback.print_exc()
 
+    # 国网电力（上游逻辑，含重试）
+    for retry_times in range(1, RETRY_TIMES_LIMIT + 1):
+        try:
+            data_fetcher.fetch()
+            return
+        except RuntimeError as e:
+            # LLM 配置错误等不可恢复错误，立即退出
+            logging.error(f"致命错误，程序退出: {e}")
+            sys.exit(1)
+        except Exception as e:
+            logging.error(f"状态刷新任务失败，原因是 [{e}]，还剩 {RETRY_TIMES_LIMIT - retry_times} 次重试机会。")
+            continue
 
 def logger_init(level: str):
     logger = logging.getLogger()
-    logger.setLevel(level)
+    logger.setLevel(level.strip().strip('\'" '))  # 兼容 .env 中带引号和空格的 LOG_LEVEL
+    # 清除已有 handler（避免 basicConfig 自动添加的默认 handler 导致日志重复）
+    logger.handlers.clear()
     logging.getLogger("urllib3").setLevel(logging.CRITICAL)
     format = logging.Formatter("%(asctime)s  [%(levelname)-8s] ---- %(message)s", "%Y-%m-%d %H:%M:%S")
     sh = logging.StreamHandler(stream=sys.stdout)

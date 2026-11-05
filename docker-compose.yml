@@ -1,23 +1,16 @@
-version: "3"
-
 services:
-  app:
+  sgcc_electricity_app:
     env_file:
       - .env
-    image: xudingjun3131/sgcc_shgas_veolia:v1.0
-    # build:
-    #   context: .
-    #   dockerfile: Dockerfile
+    image: xudingjun3131/sgcc_shgas_veolia:v1.0 # for use docker.io: arcw/sgcc_electricity:latest
+    # image: sgcc_electricity_test      # for local test
     container_name: sgcc_shgas_veolia
-    networks:
-      sgcc_network:
+    network_mode: "host"
     environment:
       - SET_CONTAINER_TIMEZONE=true
       - CONTAINER_TIMEZONE=Asia/Shanghai
     restart: unless-stopped
     volumes:
-      - ./scripts:/app
-    command: python3 main.py 
-
-networks:
-  sgcc_network:
+      - ./:/data        # if you want to read homeassistant.db, homeassistant.db is in the container at /data/
+    command: python3 main.py
+    init: true
